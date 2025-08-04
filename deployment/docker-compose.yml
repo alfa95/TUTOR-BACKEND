@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../src:/app/src
+      - ../requirements.txt:/app/requirements.txt
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - ../.env
