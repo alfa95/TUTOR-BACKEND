@@ -1,0 +1,31 @@
+version: '3.8'
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.minimal
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../src:/app/src:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      # These will be overridden by .env file with your hosted database URLs
+      - MONGO_URI=${MONGO_URI}
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_USER_COLLECTION=${MONGO_USER_COLLECTION}
+      - MONGO_QUIZ_COLLECTION=${MONGO_QUIZ_COLLECTION}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M 
