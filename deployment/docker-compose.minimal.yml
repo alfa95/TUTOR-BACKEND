@@ -10,7 +10,7 @@ services:
       - ../src:/app/src:ro
     environment:
       - PYTHONUNBUFFERED=1
-      - PORT=${PORT:-8000}
+      - PORT=8000
       - QDRANT_URL=${QDRANT_URL}
       - MONGO_URI=${MONGO_URI}
       - MONGO_DB_NAME=${MONGO_DB_NAME}
