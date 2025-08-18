@@ -24,6 +24,14 @@ from fastapi.security import OAuth2PasswordRequestForm
 app = FastAPI()
 rag_graph = build_rag_graph()
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Tutor Backend API",
+        "status": "running",
+        "version": "1.0.0"
+    }
+
 class QueryRequest(BaseModel):
     query: str
     use_llm: bool = False
