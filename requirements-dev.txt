@@ -10,3 +10,6 @@ pre-commit
 
 # === Locking & Dependency Management ===
 pip-tools
+
+# === Supabase integration ===
+supabase

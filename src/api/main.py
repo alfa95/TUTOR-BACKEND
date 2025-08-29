@@ -4,11 +4,11 @@ from fastapi import FastAPI, HTTPException, Query, Depends, status
 from pydantic import BaseModel
 from src.rag.graph import build_rag_graph
 from src.db.quiz_session_utils import (
-    create_or_update_user,
-    get_user,
     get_or_create_today_session,
     mark_quiz_completed
 )
+from src.services.adaptive_quiz_service import adaptive_quiz_service
+from src.models.quiz_models import AdaptiveQuizRequest, AdaptiveQuizResponse
 from typing import List, Dict
 from datetime import datetime
 from collections import defaultdict
@@ -16,10 +16,7 @@ from src.agents.analysis_agent import analyze_user
 from src.agents.tool_calling_agent import run_agent
 from src.agents.langgraph_agent import run_nl_query
 from src.agents.langgraph_openai_agent import run_openai_query
-from src.api.auth import get_current_user_api_key, restricted_api_key, get_current_user, hash_password, verify_password
-from src.api.jwt_utils import create_access_token
-from src.db.mongo_utils import get_user_by_email, create_user
-from fastapi.security import OAuth2PasswordRequestForm
+from src.api.auth import restricted_api_key
 
 app = FastAPI()
 rag_graph = build_rag_graph()
@@ -38,12 +35,6 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     response: dict
-
-class UserRequest(BaseModel):
-    email: str
-    name: str
-    goal_topic: str
-    duration_days: int
 
 class QuizSessionRequest(BaseModel):
     email: str
@@ -67,16 +58,6 @@ def query_endpoint(request: QueryRequest):
         return {"response": result.get("response", {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/user")
-def create_or_update_user_endpoint(request: UserRequest):
-    user = create_or_update_user(
-        email=request.email,
-        name=request.name,
-        goal_topic=request.goal_topic,
-        duration_days=request.duration_days
-    )
-    return {"user": user}
 
 @app.post("/quiz-session/today")
 def get_today_quiz_session(request: QuizSessionRequest):
@@ -148,25 +129,29 @@ def query_openai_endpoint(email: str, prompt: str, api_key: str = Depends(restri
     result = run_openai_query(prompt, email)
     return {"result": result}
 
-@app.post("/signup", status_code=status.HTTP_201_CREATED)
-def signup(email: str, name: str, password: str):
-    user = create_user(email, name, password)
-    if not user:
-        raise HTTPException(status_code=400, detail="User already exists")
-    return {"message": "User created successfully"}
-
-@app.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = get_user_by_email(form_data.username)
-    if not user or not verify_password(form_data.password, user["password"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_access_token({"sub": user["email"]})
-    return {"access_token": token, "token_type": "bearer"}
-
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-@app.get("/protected-endpoint")
-def protected_route(current_user: str = Depends(get_current_user)):
-    return {"message": f"Hello, {current_user}!"} 
+# === Adaptive Quiz Questions Endpoint ===
+
+@app.post("/quiz/adaptive-questions", response_model=AdaptiveQuizResponse)
+def get_adaptive_quiz_questions(request: AdaptiveQuizRequest):
+    """
+    Get adaptive quiz questions based on user's topic progress
+    """
+    try:
+        # Use the service to handle all the logic (user_id extracted from JWT)
+        result = adaptive_quiz_service.get_adaptive_quiz_questions(
+            jwt_token=request.jwt_token,
+            num_questions=10,
+            topics=request.topics
+        )
+        
+        return AdaptiveQuizResponse(**result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in adaptive quiz endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate adaptive quiz: {str(e)}") 

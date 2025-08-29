@@ -42,3 +42,6 @@ openai
 pyjwt
 bcrypt
 
+# === Supabase integration ===
+supabase
+

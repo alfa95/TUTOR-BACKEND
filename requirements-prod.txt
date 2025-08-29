@@ -41,3 +41,6 @@ openai
 # === Auth ===
 pyjwt
 bcrypt 
+
+# === Supabase integration ===
+supabase
