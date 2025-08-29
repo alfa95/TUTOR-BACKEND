@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI, HTTPException, Query, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from src.rag.graph import build_rag_graph
 from src.db.quiz_session_utils import (
@@ -19,6 +20,21 @@ from src.agents.langgraph_openai_agent import run_openai_query
 from src.api.auth import restricted_api_key
 
 app = FastAPI()
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080",      # Your frontend dev server
+        "http://localhost:3000",      # Alternative frontend port
+        "http://localhost:5173",      # Vite default port
+        "http://localhost:4173"      # Your production domain
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "accept", "apikey", "accept-profile"]
+)
+
 rag_graph = build_rag_graph()
 
 @app.get("/")
