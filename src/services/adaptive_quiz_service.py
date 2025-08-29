@@ -46,20 +46,31 @@ class AdaptiveQuizService:
             user_progress = get_user_topic_progress(user_id)
             
             if not user_progress:
-                raise HTTPException(
-                    status_code=404, 
-                    detail="No progress data found for user. User may need to complete some quizzes first."
-                )
-            
-            print(f"✅ Found {len(user_progress)} progress entries")
-            
-            # Step 3: Analyze progress to determine quiz strategy
-            progress_analysis = self.analyze_user_progress(user_progress)
-            print(f"📊 Progress analysis: {progress_analysis}")
+                print("🆕 New user detected - providing cold start experience")
+                # Create cold start progress analysis
+                progress_analysis = {
+                    "strategy": "cold_start",
+                    "overall_accuracy": 0,
+                    "total_attempts": 0,
+                    "total_correct": 0,
+                    "topic_performance": {},
+                    "topics": [],
+                    "difficulties": ["easy"],
+                    "is_new_user": True
+                }
+            else:
+                print(f"✅ Found {len(user_progress)} progress entries")
+                # Step 3: Analyze progress to determine quiz strategy
+                progress_analysis = self.analyze_user_progress(user_progress)
+                print(f"📊 Progress analysis: {progress_analysis}")
             
             # Step 4: Build vector DB query filter based on progress
-            print(f"🎯 Building filter for topics: {topics}")
-            vector_filter = self.build_adaptive_filter(progress_analysis, topics)
+            if progress_analysis.get("is_new_user"):
+                print("🎯 New user - building cold start filter")
+                vector_filter = self.build_adaptive_filter(progress_analysis, None)  # No topics needed for cold start
+            else:
+                print(f"🎯 Building filter for topics: {topics}")
+                vector_filter = self.build_adaptive_filter(progress_analysis, topics)
             print(f"🎯 Vector filter: {vector_filter}")
             
             # Step 5: Fetch questions from vector database
@@ -75,7 +86,8 @@ class AdaptiveQuizService:
                 "user_id": user_id,
                 "progress_summary": progress_analysis,
                 "recommended_questions": quiz_questions,
-                "quiz_strategy": progress_analysis.get("strategy", "balanced")
+                "quiz_strategy": progress_analysis.get("strategy", "balanced"),
+                "is_new_user": progress_analysis.get("is_new_user", False)
             }
             
         except HTTPException:
@@ -183,7 +195,21 @@ class AdaptiveQuizService:
             topics = self.get_all_available_topics()
         
         # Build filter based on strategy
-        if strategy == "remedial":
+        if strategy == "cold_start":
+            # Cold start: easy questions across all available topics
+            print("🎯 Cold start strategy: Easy questions across all topics")
+            all_topics = self.get_all_available_topics()
+            filter_config = {
+                "should": [
+                    {
+                        "must": [
+                            {"key": "topic", "match": {"value": topic}},
+                            {"key": "difficulty", "match": {"value": "Easy"}}
+                        ]
+                    } for topic in all_topics
+                ]
+            }
+        elif strategy == "remedial":
             # Focus on easy questions for struggling users
             filter_config = {
                 "should": [
