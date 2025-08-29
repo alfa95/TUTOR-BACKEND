@@ -71,11 +71,12 @@ class AdaptiveQuizService:
             else:
                 print(f"🎯 Building filter for topics: {topics}")
                 vector_filter = self.build_adaptive_filter(progress_analysis, topics)
+            
             print(f"🎯 Vector filter: {vector_filter}")
             
             # Step 5: Fetch questions from vector database
             print(f"🔍 Calling vector DB with filter: {vector_filter}")
-            questions = self.fetch_questions_from_vector_db(vector_filter, num_questions)
+            questions = self.fetch_questions_from_vector_db(vector_filter, num_questions, user_id)
             print(f"📚 Fetched {len(questions)} questions from vector DB")
             print(f"📋 Raw questions data: {questions[:2] if questions else 'No questions'}")
             
@@ -194,6 +195,11 @@ class AdaptiveQuizService:
             # No user progress, get all available topics
             topics = self.get_all_available_topics()
         
+        # Ensure we have topics to work with
+        if not topics:
+            print("⚠️ No topics available - this should not happen")
+            topics = ["Current Affairs"]  # Minimal fallback only if everything fails
+        
         # Build filter based on strategy
         if strategy == "cold_start":
             # Cold start: easy questions across all available topics
@@ -223,6 +229,31 @@ class AdaptiveQuizService:
             }
         elif strategy == "exploration":
             # Exploration strategy: focus on missing difficulties and new topics
+            # Add topic rotation for more variety
+            import time
+            current_hour = int(time.time() / 3600) % 24  # Hour of day for rotation
+            
+            # Get all available topics dynamically
+            all_available_topics = self.get_all_available_topics()
+            
+            # Create dynamic topic combinations (avoid hardcoded topics)
+            if len(all_available_topics) >= 2:
+                # Create rotating pairs from available topics
+                topic_pairs = []
+                for i in range(0, len(all_available_topics), 2):
+                    if i + 1 < len(all_available_topics):
+                        topic_pairs.append([all_available_topics[i], all_available_topics[i + 1]])
+                    else:
+                        topic_pairs.append([all_available_topics[i]])
+                
+                # Select topic pair based on current hour for variety
+                selected_new_topics = topic_pairs[current_hour % len(topic_pairs)]
+                print(f"🔄 Dynamic topic rotation: Hour {current_hour}, Selected: {selected_new_topics}")
+            else:
+                # Fallback if not enough topics
+                selected_new_topics = all_available_topics[:2] if all_available_topics else []
+                print(f"⚠️ Limited topics available: {selected_new_topics}")
+            
             filter_config = {
                 "should": [
                     # First priority: missing difficulties in existing topics
@@ -240,22 +271,17 @@ class AdaptiveQuizService:
                         ]
                     } for topic in topics
                 ] + [
-                    # Second priority: new topics with easy difficulty for confidence
+                    # Second priority: rotating new topics with easy difficulty
                     {
                         "must": [
-                            {"key": "topic", "match": {"value": "Geography"}},
+                            {"key": "topic", "match": {"value": topic}},
                             {"key": "difficulty", "match": {"value": "Easy"}}
                         ]
-                    },
-                    {
-                        "must": [
-                            {"key": "topic", "match": {"value": "History"}},
-                            {"key": "difficulty", "match": {"value": "Easy"}}
-                        ]
-                    }
+                    } for topic in selected_new_topics
                 ]
             }
         elif strategy == "advanced":
+            # True advanced: all difficulties attempted, focus on challenging questions
             filter_config = {
                 "should": [
                     {
@@ -306,7 +332,7 @@ class AdaptiveQuizService:
             
             if not response or not response[0]:
                 print("⚠️ No questions found in vector DB")
-                return ["Current Affairs"]  # Fallback
+                return []  # Return empty list - let the system handle it gracefully
             
             # Extract unique topics from the questions
             topics = set()
@@ -327,32 +353,79 @@ class AdaptiveQuizService:
             
         except Exception as e:
             print(f"❌ Error fetching available topics: {e}")
-            # Fallback to common topics
-            return ["Current Affairs", "Geography", "History", "Economy"]
+            # Fallback to empty list - let the system handle it gracefully
+            return []
     
-    def fetch_questions_from_vector_db(self, filter_config: Dict, limit: int) -> List[Dict]:
+    def fetch_questions_from_vector_db(self, filter_config: Dict, limit: int, user_id: str = None) -> List[Dict]:
         """
         Fetch questions from Qdrant vector database using the adaptive filter
         """
         try:
             from src.vector_store.qdrant_utils import qdrant_client
+            import random
             
             # Convert our filter to Qdrant format
             qdrant_filter = self.convert_filter_to_qdrant(filter_config)
             
-            # Fetch questions from Qdrant
+            # Fetch more questions than needed to allow for deduplication
+            fetch_limit = min(limit * 3, 100)  # Fetch up to 3x more, max 100
+            
+            # Fetch questions from Qdrant with offset for variety
+            # Use timestamp-based offset to get different questions each time
+            import time
+            offset = int(time.time() * 1000) % 10000  # Use milliseconds timestamp as offset
+            
             response = qdrant_client.scroll(
                 collection_name="gktoday_questions",
                 scroll_filter=qdrant_filter,
-                limit=limit,
+                limit=fetch_limit,
+                offset=offset,  # Add offset for variety
                 with_payload=True
             )
             
-            return response[0] if response else []
+            questions = response[0] if response else []
+            
+            if not questions:
+                return []
+            
+            # Remove duplicates based on question content
+            unique_questions = self.remove_duplicate_questions(questions)
+            
+            # Shuffle questions for variety
+            random.shuffle(unique_questions)
+            
+            print(f"🎲 Question variety: Fetched {len(questions)}, Unique: {len(unique_questions)}, Returning: {min(limit, len(unique_questions))}")
+            
+            # Return only the requested number of questions
+            return unique_questions[:limit]
             
         except Exception as e:
             print(f"❌ Error fetching from vector DB: {e}")
             return []
+    
+    def remove_duplicate_questions(self, questions: List[Dict]) -> List[Dict]:
+        """
+        Remove duplicate questions based on question content
+        """
+        seen_questions = set()
+        unique_questions = []
+        
+        for question in questions:
+            # Handle Qdrant Record objects
+            if hasattr(question, 'payload'):
+                question_text = question.payload.get('question', '')
+            else:
+                question_text = question.get('payload', {}).get('question', '')
+            
+            # Create a normalized version for comparison (lowercase, no extra spaces)
+            normalized_text = ' '.join(question_text.lower().split())
+            
+            if normalized_text not in seen_questions:
+                seen_questions.add(normalized_text)
+                unique_questions.append(question)
+        
+        print(f"🔄 Deduplication: {len(questions)} → {len(unique_questions)} unique questions")
+        return unique_questions
     
     def convert_filter_to_qdrant(self, filter_config: Dict) -> Dict:
         """
