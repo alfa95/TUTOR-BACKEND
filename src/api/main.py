@@ -24,7 +24,8 @@ app.add_middleware(
         "http://localhost:8080",      # Your frontend dev server
         "http://localhost:3000",      # Alternative frontend port
         "http://localhost:5173",      # Vite default port
-        "http://localhost:4173"      # Your production domain
+        "http://localhost:4173",      # Your production domain
+        "https://skillquest.pages.dev"  # SkillQuest frontend
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
