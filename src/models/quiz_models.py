@@ -4,10 +4,14 @@ Quiz Models - Data structures for quiz functionality
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 
+class TopicRequest(BaseModel):
+    topic: str
+    difficulty: Optional[str] = None  # Optional: "Easy", "Medium", "Hard"
+
 class AdaptiveQuizRequest(BaseModel):
     jwt_token: str
     num_questions: int = 10
-    topics: Optional[List[str]] = None  # Optional: specific topics to focus on
+    topic_requests: Optional[List[TopicRequest]] = None  # Optional: specific topics and difficulties to focus on
 
 class QuizQuestion(BaseModel):
     id: str

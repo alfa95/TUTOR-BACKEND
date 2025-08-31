@@ -4,6 +4,7 @@ Adaptive Quiz Service - Handles user progress analysis and question recommendati
 from typing import List, Dict, Optional
 from fastapi import HTTPException
 from src.db.supabase_utils import get_user_topic_progress
+from src.services.learning_path_optimizer import learning_path_optimizer
 
 class AdaptiveQuizService:
     def __init__(self):
@@ -13,7 +14,7 @@ class AdaptiveQuizService:
         self, 
         jwt_token: str, 
         num_questions: int = 10, 
-        topics: List[str] = None
+        topic_requests: List = None  # Can be List[TopicRequest] or List[Dict]
     ) -> Dict:
         """
         Get adaptive quiz questions based on user's topic progress
@@ -64,23 +65,28 @@ class AdaptiveQuizService:
                 progress_analysis = self.analyze_user_progress(user_progress)
                 print(f"📊 Progress analysis: {progress_analysis}")
             
-            # Step 4: Build vector DB query filter based on progress
+            # Step 4: Get intelligent learning path recommendation
+            learning_recommendation = self._get_learning_recommendation(
+                user_id, progress_analysis, user_info
+            )
+            
+            # Step 5: Build vector DB query filter based on progress
             if progress_analysis.get("is_new_user"):
                 print("🎯 New user - building cold start filter")
                 vector_filter = self.build_adaptive_filter(progress_analysis, None)  # No topics needed for cold start
             else:
-                print(f"🎯 Building filter for topics: {topics}")
-                vector_filter = self.build_adaptive_filter(progress_analysis, topics)
+                print(f"🎯 Building filter for topic_requests: {topic_requests}")
+                vector_filter = self.build_adaptive_filter(progress_analysis, topic_requests)
             
             print(f"🎯 Vector filter: {vector_filter}")
             
-            # Step 5: Fetch questions from vector database
+            # Step 6: Fetch questions from vector database
             print(f"🔍 Calling vector DB with filter: {vector_filter}")
             questions = self.fetch_questions_from_vector_db(vector_filter, num_questions, user_id)
             print(f"📚 Fetched {len(questions)} questions from vector DB")
             print(f"📋 Raw questions data: {questions[:2] if questions else 'No questions'}")
             
-            # Step 6: Format response
+            # Step 7: Format response
             quiz_questions = self.format_questions_for_quiz(questions)
             
             return {
@@ -88,7 +94,8 @@ class AdaptiveQuizService:
                 "progress_summary": progress_analysis,
                 "recommended_questions": quiz_questions,
                 "quiz_strategy": progress_analysis.get("strategy", "balanced"),
-                "is_new_user": progress_analysis.get("is_new_user", False)
+                "is_new_user": progress_analysis.get("is_new_user", False),
+                "learning_path": learning_recommendation
             }
             
         except HTTPException:
@@ -96,6 +103,37 @@ class AdaptiveQuizService:
         except Exception as e:
             print(f"❌ Error in adaptive quiz service: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to generate adaptive quiz: {str(e)}")
+    
+    def _get_learning_recommendation(
+        self, 
+        user_id: str, 
+        progress_analysis: Dict, 
+        user_info: Dict
+    ) -> Dict:
+        """
+        Get intelligent learning path recommendation
+        """
+        try:
+            # Extract user preferences from JWT info
+            user_preferences = {
+                "learning_style": "reading_writing",  # Default, can be enhanced
+                "time_available": 60,  # Default 60 minutes
+                "focus_areas": progress_analysis.get("topics", [])
+            }
+            
+            # Get next learning recommendation
+            recommendation = learning_path_optimizer.get_next_learning_recommendation(
+                user_id=user_id,
+                current_progress=progress_analysis,
+                user_preferences=user_preferences
+            )
+            
+            print(f"🎯 Learning recommendation: {recommendation}")
+            return recommendation
+            
+        except Exception as e:
+            print(f"⚠️ Error getting learning recommendation: {e}")
+            return {"message": "Learning path optimization temporarily unavailable"}
     
     def analyze_user_progress(self, user_progress: List[Dict]) -> Dict:
         """
@@ -139,8 +177,18 @@ class AdaptiveQuizService:
         # Determine strategy with smart progression logic
         if overall_accuracy < 50:
             strategy = "remedial"  # Focus on easy questions
+            print(f"🎯 Low accuracy ({overall_accuracy}%) - using remedial strategy")
         elif overall_accuracy < 75:
-            strategy = "balanced"   # Mix of difficulties
+            # Check if user is stuck in easy questions or has gaps
+            easy_heavy = self._is_user_easy_heavy(topic_performance)
+            has_gaps = self._has_significant_gaps(topic_performance)
+            
+            if easy_heavy and has_gaps:
+                strategy = "exploration"  # Help user progress to harder difficulties
+                print(f"🎯 Balanced accuracy ({overall_accuracy}%) but easy-heavy with gaps - using exploration strategy")
+            else:
+                strategy = "balanced"   # Mix of difficulties
+                print(f"🎯 Balanced accuracy ({overall_accuracy}%) - using balanced strategy")
         else:
             # Advanced users need variety - check if they're missing difficulties
             missing_difficulties = []
@@ -155,10 +203,10 @@ class AdaptiveQuizService:
             
             if missing_difficulties:
                 strategy = "exploration"  # New strategy for variety
-                print(f"🎯 User missing difficulties: {missing_difficulties} - using exploration strategy")
+                print(f"🎯 High accuracy ({overall_accuracy}%) but missing difficulties: {missing_difficulties} - using exploration strategy")
             else:
                 strategy = "advanced"     # True advanced - all difficulties attempted
-                print(f"🎯 User has attempted all difficulties - using advanced strategy")
+                print(f"🎯 High accuracy ({overall_accuracy}%) with all difficulties attempted - using advanced strategy")
         
         print(f"📊 Final strategy: {strategy}")
         
@@ -172,16 +220,77 @@ class AdaptiveQuizService:
             "difficulties": ["easy", "medium", "hard"]
         }
     
-    def build_adaptive_filter(self, progress_analysis: Dict, requested_topics: List[str] = None) -> Dict:
+    def _is_user_easy_heavy(self, topic_performance: Dict) -> bool:
+        """
+        Check if user is mostly attempting easy questions
+        """
+        total_easy_attempts = 0
+        total_medium_attempts = 0
+        total_hard_attempts = 0
+        
+        for topic_data in topic_performance.values():
+            # Count attempts based on accuracy > 0 (indicating attempts were made)
+            if topic_data['easy'] > 0:
+                total_easy_attempts += 1
+            if topic_data['medium'] > 0:
+                total_medium_attempts += 1
+            if topic_data['hard'] > 0:
+                total_hard_attempts += 1
+        
+        # User is easy-heavy if they have significantly more easy attempts than medium/hard
+        total_attempts = total_easy_attempts + total_medium_attempts + total_hard_attempts
+        if total_attempts == 0:
+            return False
+            
+        easy_ratio = total_easy_attempts / total_attempts
+        return easy_ratio > 0.6  # More than 60% of attempts are easy
+    
+    def _has_significant_gaps(self, topic_performance: Dict) -> bool:
+        """
+        Check if user has significant gaps in difficulty levels or topics
+        """
+        # Check for topics with 0% performance (no attempts)
+        topics_with_no_attempts = 0
+        total_topics = len(topic_performance)
+        
+        for topic_data in topic_performance.values():
+            if topic_data['total_accuracy'] == 0:
+                topics_with_no_attempts += 1
+        
+        # Check for difficulty gaps
+        difficulty_coverage = {'easy': 0, 'medium': 0, 'hard': 0}
+        for topic_data in topic_performance.values():
+            for difficulty in ['easy', 'medium', 'hard']:
+                if topic_data[difficulty] > 0:
+                    difficulty_coverage[difficulty] += 1
+        
+        # User has gaps if:
+        # 1. More than 25% of topics have no attempts, OR
+        # 2. They haven't attempted medium or hard difficulties in most topics
+        topic_gap_ratio = topics_with_no_attempts / total_topics if total_topics > 0 else 0
+        has_difficulty_gaps = difficulty_coverage['medium'] < total_topics * 0.5 or difficulty_coverage['hard'] < total_topics * 0.3
+        
+        return topic_gap_ratio > 0.25 or has_difficulty_gaps
+    
+    def build_adaptive_filter(self, progress_analysis: Dict, topic_requests: List = None) -> Dict:
         """
         Build vector DB query filter based on user progress analysis
+        Handles both Pydantic TopicRequest objects and dictionaries
         """
         strategy = progress_analysis.get("strategy", "balanced")
         
-        # Get topics dynamically from vector DB if none requested
-        if requested_topics:
-            topics = requested_topics
-        elif progress_analysis.get("topics"):
+        # Handle topic_requests if provided
+        if topic_requests and len(topic_requests) > 0:
+            print(f"🎯 Using topic_requests structure: {topic_requests}")
+            # Build specific filters based on user's topic and difficulty preferences
+            filter_config = self._build_topic_specific_filter(topic_requests)
+            return filter_config
+        
+        # No specific topic requests - use system's adaptive logic based on user progress
+        print("🎯 No topic requests - using adaptive system logic")
+        
+        # Get topics from user's progress or available topics
+        if progress_analysis.get("topics"):
             # Use user's existing topics but also add variety from other available topics
             user_topics = progress_analysis.get("topics", [])
             all_available_topics = self.get_all_available_topics()
@@ -314,6 +423,71 @@ class AdaptiveQuizService:
             }
         
         return filter_config
+    
+    def _build_topic_specific_filter(self, topic_requests: List) -> Dict:
+        """
+        Build filter based on specific topic and difficulty requests from user
+        Handles both Pydantic TopicRequest objects and dictionaries
+        """
+        print(f"🎯 Building topic-specific filter for {len(topic_requests)} requests")
+        
+        filter_conditions = []
+        
+        for topic_req in topic_requests:
+            # Handle both Pydantic objects and dictionaries
+            if hasattr(topic_req, 'topic'):
+                # Pydantic object
+                topic = topic_req.topic
+                difficulty = topic_req.difficulty
+            else:
+                # Dictionary
+                topic = topic_req.get("topic")
+                difficulty = topic_req.get("difficulty")
+            
+            if not topic:
+                continue
+                
+            if difficulty:
+                # User specified both topic and difficulty
+                print(f"🎯 Adding filter for topic: {topic}, difficulty: {difficulty}")
+                filter_conditions.append({
+                    "must": [
+                        {"key": "topic", "match": {"value": topic}},
+                        {"key": "difficulty", "match": {"value": difficulty}}
+                    ]
+                })
+            else:
+                # User only specified topic, system will choose difficulty
+                print(f"🎯 Adding filter for topic: {topic} (any difficulty)")
+                filter_conditions.append({
+                    "must": [
+                        {"key": "topic", "match": {"value": topic}}
+                    ]
+                })
+        
+        if not filter_conditions:
+            print("⚠️ No valid topic requests found, falling back to default")
+            return self._build_default_filter()
+        
+        print(f"🎯 Built {len(filter_conditions)} filter conditions")
+        return {
+            "should": filter_conditions
+        }
+    
+    def _build_default_filter(self) -> Dict:
+        """
+        Build a default filter when no specific preferences are given
+        """
+        print("🎯 Building default filter")
+        return {
+            "should": [
+                {
+                    "must": [
+                        {"key": "difficulty", "match": {"value": "Easy"}}
+                    ]
+                }
+            ]
+        }
     
     def get_all_available_topics(self) -> List[str]:
         """

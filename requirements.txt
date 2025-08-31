@@ -17,7 +17,7 @@ qdrant-client
 sentence-transformers
 torch  # required for sentence-transformers
 
-# === Gemini API ===
+# === LLM Integration ===
 google-generativeai
 langchain-google-genai
 
