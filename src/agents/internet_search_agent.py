@@ -12,6 +12,8 @@ class InternetSearchState(TypedDict, total=False):
     model_type: str
     model_name: str
     use_llm: bool = False
+    enable_reranking: bool = False
+    reranking_strategy: str = "semantic_relevance"
 
 # Step 1: Process the query
 def process_query_node(state: InternetSearchState) -> InternetSearchState:
@@ -27,9 +29,16 @@ def search_node(state: InternetSearchState) -> InternetSearchState:
     """Perform internet search using SerperDev"""
     query = state.get("query", "")
     context = state.get("context", "")
+    enable_reranking = state.get("enable_reranking", False)
+    reranking_strategy = state.get("reranking_strategy", "semantic_relevance")
     
     try:
-        results = search_internet(query, num_results=4)
+        results = search_internet(
+            query, 
+            num_results=4, 
+            enable_reranking=enable_reranking,
+            reranking_strategy=reranking_strategy
+        )
         return {**state, "search_results": results}
     except Exception as e:
         return {**state, "error": f"Search failed: {str(e)}"}
@@ -109,13 +118,16 @@ def build_internet_search_graph():
     return builder.compile()
 
 # Convenience function to run the graph
-def run_internet_search(query: str, use_llm: bool = False):
+def run_internet_search(query: str, use_llm: bool = False, enable_reranking: bool = False, 
+                       reranking_strategy: str = "semantic_relevance"):
     """
     Run internet search using LangGraph
     
     Args:
         query (str): Search query
         use_llm (bool): Whether to use LLM for response enhancement
+        enable_reranking (bool): Whether to enable LLM reranking
+        reranking_strategy (str): Reranking strategy to use
     
     Returns:
         dict: Search results and optional LLM enhancement
@@ -128,7 +140,9 @@ def run_internet_search(query: str, use_llm: bool = False):
             "context": "",  # No context needed for simple queries
             "use_llm": use_llm,
             "model_type": "gemini",  # Default to Gemini
-            "model_name": "gemini-1.5-flash"  # Default model
+            "model_name": "gemini-1.5-flash",  # Default model
+            "enable_reranking": enable_reranking,
+            "reranking_strategy": reranking_strategy
         }
         
         result = graph.invoke(inputs)

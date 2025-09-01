@@ -3,13 +3,16 @@ import requests
 import json
 from typing import List, Dict, Optional
 
-def search_internet(query: str, num_results: int = 4) -> List[Dict]:
+def search_internet(query: str, num_results: int = 4, enable_reranking: bool = False, 
+                   reranking_strategy: str = "semantic_relevance") -> List[Dict]:
     """
     Search the internet using SerperDev API and return top results
     
     Args:
         query (str): The search query
         num_results (int): Number of results to return (default: 4)
+        enable_reranking (bool): Whether to enable LLM reranking
+        reranking_strategy (str): Reranking strategy to use
     
     Returns:
         List[Dict]: List of search results with title, link, and snippet
@@ -25,9 +28,12 @@ def search_internet(query: str, num_results: int = 4) -> List[Dict]:
             "Content-Type": "application/json"
         }
         
+        # Get more results initially for better reranking
+        search_count = max(num_results * 2, 8) if enable_reranking else num_results
+        
         payload = {
             "q": query,
-            "num": num_results
+            "num": search_count
         }
         
         response = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -40,7 +46,7 @@ def search_internet(query: str, num_results: int = 4) -> List[Dict]:
         
         # Format results
         formatted_results = []
-        for result in organic_results[:num_results]:
+        for result in organic_results[:search_count]:
             formatted_results.append({
                 "title": result.get("title", ""),
                 "link": result.get("link", ""),
@@ -48,7 +54,22 @@ def search_internet(query: str, num_results: int = 4) -> List[Dict]:
                 "position": result.get("position", 0)
             })
         
-        return formatted_results
+        # Apply reranking if enabled
+        if enable_reranking and formatted_results:
+            try:
+                from src.services.reranking_service import reranking_service
+                reranked_results = reranking_service.rerank_results(
+                    query, formatted_results, reranking_strategy
+                )
+                
+                # Return top N reranked results
+                return reranked_results[:num_results]
+                
+            except Exception as e:
+                print(f"⚠️ Reranking failed, returning original results: {e}")
+                return formatted_results[:num_results]
+        
+        return formatted_results[:num_results]
         
     except requests.exceptions.RequestException as e:
         print(f"❌ Request error in internet search: {e}")

@@ -1,8 +1,11 @@
 from dotenv import load_dotenv
 load_dotenv()
+import time
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 from src.rag.graph import build_rag_graph
 
 from src.services.adaptive_quiz_service import adaptive_quiz_service
@@ -10,12 +13,32 @@ from src.models.quiz_models import AdaptiveQuizRequest, AdaptiveQuizResponse
 from src.services.learning_path_optimizer import learning_path_optimizer
 from src.models.learning_path_models import LearningPathRequest, LearningPathResponse
 from src.services.gemini_learning_enhancer import gemini_enhancer
-
+from src.services.metrics_service import metrics_service
+from src.services.ragas_evaluation_service import ragas_evaluation_service
+from src.services.phoenix_integration_service import phoenix_integration_service
 
 from src.agents.internet_search_agent import run_internet_search
 
 
-app = FastAPI()
+app = FastAPI(
+    title="Tutor Backend API",
+    description="AI-powered tutoring and learning management system with adaptive quizzes, learning paths, and intelligent content retrieval",
+    version="1.0.0",
+    openapi_tags=[
+        {
+            "name": "Core Learning API",
+            "description": "Core endpoints for learning, quizzes, and content retrieval"
+        },
+        {
+            "name": "System Metrics",
+            "description": "System performance monitoring and analytics endpoints"
+        },
+        {
+            "name": "System",
+            "description": "Basic system endpoints for health checks and root access"
+        }
+    ]
+)
 
 # Configure CORS
 app.add_middleware(
@@ -34,7 +57,7 @@ app.add_middleware(
 
 rag_graph = build_rag_graph()
 
-@app.get("/")
+@app.get("/", tags=["System"])
 async def root():
     return {
         "message": "Tutor Backend API",
@@ -45,65 +68,412 @@ async def root():
 class QueryRequest(BaseModel):
     query: str
     use_llm: bool = False
+    enable_reranking: bool = False
+    reranking_strategy: str = "semantic_relevance"
+    enable_evaluation: bool = False  # NEW: Enable RAGAS evaluation
+    ground_truth: Optional[str] = None  # NEW: Optional ground truth for evaluation
 
 class QueryResponse(BaseModel):
     response: dict
+    evaluation: Optional[dict] = None  # NEW: RAGAS evaluation results
 
 
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse, tags=["Core Learning API"])
 def query_endpoint(request: QueryRequest):
+    start_time = time.time()
     try:
         inputs = request.dict()
         inputs["model_type"] = "gemini"
         inputs["model_name"] = "gemini-1.5-flash"
+        
+        # Add reranking parameters to inputs
+        inputs["enable_reranking"] = request.enable_reranking
+        inputs["reranking_strategy"] = request.reranking_strategy
+        
         result = rag_graph.invoke(inputs)
-        return {"response": result.get("response", {})}
+        
+        # Extract response and context for evaluation
+        response_data = result.get("response", {})
+        context = result.get("context", [])
+        
+        # Generate response text for evaluation
+        response_text = ""
+        if request.use_llm and "explanation" in response_data:
+            response_text = response_data["explanation"]
+        elif "questions" in response_data and response_data["questions"]:
+            # Use first question as response text for evaluation
+            first_question = response_data["questions"][0]
+            if isinstance(first_question, dict):
+                response_text = first_question.get("question", str(first_question))
+            else:
+                response_text = str(first_question)
+        else:
+            response_text = str(response_data)
+        
+        # Perform RAGAS evaluation if requested
+        evaluation_dict = None
+        if request.enable_evaluation:
+            try:
+                evaluation_result = ragas_evaluation_service.evaluate_rag_quality(
+                    query=request.query,
+                    context=context,
+                    response=response_text,
+                    ground_truth=request.ground_truth
+                )
+                
+                # Convert evaluation result to dict for API response
+                evaluation_dict = {
+                    "metrics": {
+                        "context_precision": evaluation_result.metrics.context_precision,
+                        "faithfulness": evaluation_result.metrics.faithfulness,
+                        "answer_correctness": evaluation_result.metrics.answer_correctness,
+                        "context_relevancy": evaluation_result.metrics.context_relevancy,
+                        "overall_score": evaluation_result.metrics.overall_score,
+                        "evaluation_time": evaluation_result.metrics.evaluation_time
+                    },
+                    "quality_insights": evaluation_result.quality_insights,
+                    "recommendations": evaluation_result.recommendations,
+                    "metadata": evaluation_result.metrics.metadata
+                }
+                
+                # Record evaluation metrics
+                metrics_service.record_api_call(
+                    endpoint="/query",
+                    use_llm=request.use_llm,
+                    response_time=time.time() - start_time,
+                    success=True,
+                    additional_metrics={
+                        "ragas_context_precision": evaluation_result.metrics.context_precision,
+                        "ragas_faithfulness": evaluation_result.metrics.faithfulness,
+                        "ragas_answer_correctness": evaluation_result.metrics.answer_correctness,
+                        "ragas_context_relevancy": evaluation_result.metrics.context_relevancy,
+                        "ragas_overall_score": evaluation_result.metrics.overall_score
+                    }
+                )
+                
+            except Exception as eval_error:
+                print(f"⚠️ RAGAS evaluation failed: {eval_error}")
+                evaluation_dict = {
+                    "error": f"Evaluation failed: {str(eval_error)}",
+                    "status": "evaluation_failed"
+                }
+        else:
+            # Record successful API call without evaluation
+            response_time = time.time() - start_time
+            metrics_service.record_api_call(
+                endpoint="/query",
+                use_llm=request.use_llm,
+                response_time=response_time,
+                success=True
+            )
+        
+        return {
+            "response": response_data,
+            "evaluation": evaluation_dict
+        }
+        
     except Exception as e:
+        # Record failed API call
+        response_time = time.time() - start_time
+        metrics_service.record_api_call(
+            endpoint="/query",
+            use_llm=request.use_llm,
+            response_time=response_time,
+            success=False
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 
 
 
-@app.get("/health")
+@app.get("/health", tags=["System"])
 def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+@app.post("/phoenix/start", tags=["System"])
+def start_phoenix_server():
+    """Start Phoenix server for LLM observability"""
+    try:
+        success = phoenix_integration_service.start_phoenix_server()
+        if success:
+            return {
+                "status": "success",
+                "message": "Phoenix server started successfully",
+                "phoenix_url": phoenix_integration_service.get_phoenix_url(),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to start Phoenix server")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting Phoenix server: {str(e)}")
+
+@app.get("/phoenix/status", tags=["System"])
+def get_phoenix_status():
+    """Get Phoenix server status"""
+    return {
+        "phoenix_available": phoenix_integration_service.phoenix_available,
+        "phoenix_url": phoenix_integration_service.get_phoenix_url(),
+        "port": phoenix_integration_service.port,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 # === Quiz Detail Endpoint (Internet Search) ===
 
 class QuizDetailRequest(BaseModel):
     query: str
     use_llm: bool = False
+    enable_reranking: bool = False
+    reranking_strategy: str = "semantic_relevance"
+    enable_evaluation: bool = False  # NEW: Enable RAGAS evaluation
+    ground_truth: Optional[str] = None  # NEW: Optional ground truth for evaluation
 
-@app.post("/quiz-detail")
+@app.post("/quiz-detail", tags=["Core Learning API"])
 def get_quiz_detail(request: QuizDetailRequest):
     """
     Get internet search results for quiz questions using LangGraph and SerperDev
     """
+    start_time = time.time()
+    
+    # Start Phoenix tracing
+    trace_id = phoenix_integration_service.log_quiz_detail_request(
+        query=request.query,
+        use_llm=request.use_llm,
+        enable_reranking=request.enable_reranking,
+        reranking_strategy=request.reranking_strategy,
+        enable_evaluation=request.enable_evaluation,
+        ground_truth=request.ground_truth
+    )
+    
     try:
         if not request.query or not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
+        # Log search start
+        search_start_time = time.time()
+        
         result = run_internet_search(
             query=request.query.strip(),
-            use_llm=request.use_llm
+            use_llm=request.use_llm,
+            enable_reranking=request.enable_reranking,
+            reranking_strategy=request.reranking_strategy
+        )
+        
+        # Log search results and performance
+        search_time = time.time() - search_start_time
+        search_results = result.get("results", [])
+        phoenix_integration_service.log_search_results(
+            trace_id=trace_id,
+            search_results=search_results,
+            search_time=search_time,
+            reranking_applied=request.enable_reranking
         )
         
         if "error" in result:
+            # Record failed API call
+            response_time = time.time() - start_time
+            metrics_service.record_api_call(
+                endpoint="/quiz-detail",
+                use_llm=request.use_llm,
+                response_time=response_time,
+                success=False
+            )
             raise HTTPException(status_code=500, detail=result["error"])
         
-        return result
+        # Extract response and context for evaluation
+        response_data = result
+        context = result.get("results", [])
+        
+        # Generate response text for evaluation
+        response_text = ""
+        if request.use_llm and "llm_summary" in result:
+            response_text = result["llm_summary"]
+            # Log LLM enhancement to Phoenix
+            llm_time = time.time() - search_start_time
+            phoenix_integration_service.log_llm_enhancement(
+                trace_id=trace_id,
+                query=request.query,
+                search_results=search_results,
+                llm_summary=response_text,
+                llm_time=llm_time,
+                model_used=result.get("model_used", "unknown")
+            )
+        elif "results" in result and result["results"]:
+            # Use first result as response text for evaluation
+            first_result = result["results"][0]
+            if isinstance(first_result, dict):
+                response_text = first_result.get("snippet", str(first_result))
+            else:
+                response_text = str(first_result)
+        else:
+            response_text = str(result)
+        
+        # Perform RAGAS evaluation if requested
+        evaluation_dict = None
+        if request.enable_evaluation:
+            try:
+                evaluation_result = ragas_evaluation_service.evaluate_rag_quality(
+                    query=request.query,
+                    context=context,
+                    response=response_text,
+                    ground_truth=request.ground_truth
+                )
+                
+                # Convert evaluation result to dict for API response
+                evaluation_dict = {
+                    "metrics": {
+                        "context_precision": evaluation_result.metrics.context_precision,
+                        "faithfulness": evaluation_result.metrics.faithfulness,
+                        "answer_correctness": evaluation_result.metrics.answer_correctness,
+                        "context_relevancy": evaluation_result.metrics.context_relevancy,
+                        "overall_score": evaluation_result.metrics.overall_score,
+                        "evaluation_time": evaluation_result.metrics.evaluation_time
+                    },
+                    "quality_insights": evaluation_result.quality_insights,
+                    "recommendations": evaluation_result.recommendations,
+                    "metadata": evaluation_result.metrics.metadata
+                }
+                
+                # Record evaluation metrics
+                metrics_service.record_api_call(
+                    endpoint="/quiz-detail",
+                    use_llm=request.use_llm,
+                    response_time=time.time() - start_time,
+                    success=True,
+                    additional_metrics={
+                        "ragas_context_precision": evaluation_result.metrics.context_precision,
+                        "ragas_faithfulness": evaluation_result.metrics.faithfulness,
+                        "ragas_answer_correctness": evaluation_result.metrics.answer_correctness,
+                        "ragas_context_relevancy": evaluation_result.metrics.context_relevancy,
+                        "ragas_overall_score": evaluation_result.metrics.overall_score
+                    }
+                )
+                
+            except Exception as eval_error:
+                print(f"⚠️ RAGAS evaluation failed in quiz-detail: {eval_error}")
+                evaluation_dict = {
+                    "error": f"Evaluation failed: {str(eval_error)}",
+                    "status": "evaluation_failed"
+                }
+        else:
+            # Record successful API call without evaluation
+            response_time = time.time() - start_time
+            metrics_service.record_api_call(
+                endpoint="/quiz-detail",
+                use_llm=request.use_llm,
+                response_time=response_time,
+                success=True
+            )
+        
+        # Log request completion to Phoenix
+        total_time = time.time() - start_time
+        phoenix_integration_service.log_request_completion(
+            trace_id=trace_id,
+            total_time=total_time,
+            success=True
+        )
+        
+        # Return result with optional evaluation
+        if request.enable_evaluation:
+            return {
+                **result,
+                "evaluation": evaluation_dict
+            }
+        else:
+            return result
         
     except HTTPException:
+        # Log error completion to Phoenix
+        total_time = time.time() - start_time
+        phoenix_integration_service.log_request_completion(
+            trace_id=trace_id,
+            total_time=total_time,
+            success=False,
+            error_message="HTTP Exception"
+        )
         raise
     except Exception as e:
+        # Log error completion to Phoenix
+        total_time = time.time() - start_time
+        phoenix_integration_service.log_request_completion(
+            trace_id=trace_id,
+            total_time=total_time,
+            success=False,
+            error_message=str(e)
+        )
+        
+        # Record failed API call
+        response_time = time.time() - start_time
+        metrics_service.record_api_call(
+            endpoint="/quiz-detail",
+            use_llm=request.use_llm,
+            response_time=response_time,
+            success=False
+        )
         print(f"❌ Error in quiz-detail endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch quiz details: {str(e)}")
 
+# === System Metrics Dashboard ===
+
+@app.get("/metrics/dashboard", tags=["System Metrics"])
+def get_system_metrics():
+    """
+    Get comprehensive system performance metrics and statistics
+    """
+    try:
+        metrics = metrics_service.get_system_metrics()
+        return metrics
+    except Exception as e:
+        print(f"❌ Error in metrics dashboard: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metrics: {str(e)}")
+
+@app.get("/metrics/summary", tags=["System Metrics"])
+def get_metrics_summary():
+    """
+    Get a summary of system performance with insights and recommendations
+    """
+    try:
+        summary = metrics_service.get_metrics_summary()
+        return summary
+    except Exception as e:
+        print(f"❌ Error in metrics summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metrics summary: {str(e)}")
+
+@app.get("/metrics/trends", tags=["System Metrics"])
+def get_performance_trends(days: int = 30):
+    """
+    Get performance trends over time
+    """
+    try:
+        if days < 1 or days > 365:
+            raise HTTPException(status_code=400, detail="Days must be between 1 and 365")
+        
+        trends = metrics_service.get_performance_trends(days)
+        return {"trends": trends, "period_days": days}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in performance trends: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trends: {str(e)}")
+
+@app.get("/metrics/realtime", tags=["System Metrics"])
+def get_real_time_metrics():
+    """
+    Get real-time system monitoring metrics
+    """
+    try:
+        realtime = metrics_service.get_real_time_metrics()
+        return realtime
+    except Exception as e:
+        print(f"❌ Error in real-time metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch real-time metrics: {str(e)}")
+
+
+
 # === Adaptive Quiz Questions Endpoint ===
 
-@app.post("/quiz/adaptive-questions", response_model=AdaptiveQuizResponse)
+@app.post("/quiz/adaptive-questions", response_model=AdaptiveQuizResponse, tags=["Core Learning API"])
 def get_adaptive_quiz_questions(request: AdaptiveQuizRequest):
     """
     Get adaptive quiz questions based on user's topic progress
@@ -124,7 +494,7 @@ def get_adaptive_quiz_questions(request: AdaptiveQuizRequest):
         print(f"❌ Error in adaptive quiz endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate adaptive quiz: {str(e)}") 
 
-@app.post("/learning-path/dashboard", response_model=LearningPathResponse)
+@app.post("/learning-path/dashboard", response_model=LearningPathResponse, tags=["Core Learning API"])
 async def get_learning_dashboard(
     request: LearningPathRequest
     # Single endpoint - with LLM option!

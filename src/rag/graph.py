@@ -14,6 +14,8 @@ class RAGState(TypedDict, total=False):
     model_type: str  # e.g., "gemini", "hf", etc.
     model_name: str  # Optional override for model selection
     use_llm: bool = False  # Whether to use LLM for explanation
+    enable_reranking: bool = False  # Whether to rerank search results
+    reranking_strategy: str = "semantic_relevance"  # Reranking strategy
 
 
 # Step 2: Embed query
@@ -37,6 +39,77 @@ def search_qdrant_node(state: RAGState) -> RAGState:
             }
         }
     return {**state, "context": hits}
+
+# Step 3.5: Rerank search results (optional)
+def rerank_results_node(state: RAGState) -> RAGState:
+    if not state.get("enable_reranking") or not state.get("context"):
+        return state
+    
+    try:
+        from src.services.reranking_service import reranking_service
+        
+        # Convert context to reranking format
+        search_results = []
+        for i, hit in enumerate(state["context"]):
+            search_results.append({
+                "title": hit.get("question", f"Result {i+1}"),
+                "link": hit.get("source", f"#result-{i+1}"),
+                "snippet": hit.get("answer", hit.get("question", "")),
+                "position": i + 1
+            })
+        
+        print(f"🔍 Converting {len(search_results)} results for reranking")
+        
+        # Apply reranking
+        reranked_results = reranking_service.rerank_results(
+            state["query"],
+            search_results,
+            state.get("reranking_strategy", "semantic_relevance")
+        )
+        
+        print(f"🔍 Reranking returned {len(reranked_results)} results")
+        
+        # Convert back to original format and update context
+        reranked_context = []
+        for reranked in reranked_results:
+            # Find original hit by position (using index-based matching)
+            original_position = reranked["position"]
+            if 1 <= original_position <= len(state["context"]):
+                original_hit = state["context"][original_position - 1]  # Convert to 0-based index
+                
+                # Add reranking metadata
+                reranked_hit = {**original_hit}
+                reranked_hit["relevance_score"] = reranked["relevance_score"]
+                reranked_hit["rerank_position"] = reranked["rerank_position"]
+                reranked_context.append(reranked_hit)
+                print(f"✅ Mapped position {original_position} to result: {reranked_hit.get('question', 'No title')[:30]}...")
+            else:
+                print(f"⚠️ Invalid position {original_position} in reranked results")
+        
+        # Sort by rerank position
+        reranked_context.sort(key=lambda x: x.get("rerank_position", 0))
+        
+        print(f"✅ Reranked {len(reranked_context)} results for query: {state['query']}")
+        
+        # Ensure we always return the original context if reranking fails
+        if not reranked_context:
+            print("⚠️ Reranking produced no results, returning original context")
+            # Add fallback metadata to original context
+            fallback_context = []
+            for i, hit in enumerate(state["context"]):
+                fallback_hit = {**hit}
+                fallback_hit["relevance_score"] = max(0.1, 1.0 - (i * 0.1))
+                fallback_hit["rerank_position"] = i + 1
+                fallback_context.append(fallback_hit)
+            
+            print(f"✅ Applied fallback scoring to {len(fallback_context)} results")
+            return {**state, "context": fallback_context}
+            
+        return {**state, "context": reranked_context}
+        
+    except Exception as e:
+        print(f"⚠️ Reranking failed, using original results: {e}")
+        return state
 
 
 # Step 4: Generate answer with LLM
@@ -74,11 +147,13 @@ def build_rag_graph():
 
     builder.add_node("embed_query", embed_query_node)
     builder.add_node("search_qdrant", search_qdrant_node)
+    builder.add_node("rerank_results", rerank_results_node)
     builder.add_node("generate_response", generate_response_node)
 
     builder.set_entry_point("embed_query")
     builder.add_edge("embed_query", "search_qdrant")
-    builder.add_edge("search_qdrant", "generate_response")
+    builder.add_edge("search_qdrant", "rerank_results")
+    builder.add_edge("rerank_results", "generate_response")
     builder.add_edge("generate_response", END)
 
     return builder.compile()
